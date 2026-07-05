@@ -3,78 +3,57 @@ package com.my.vkturn.vpn;
 import android.content.Intent;
 import android.net.VpnService;
 import android.os.ParcelFileDescriptor;
-import android.util.Log;
+import java.io.*;
 
 public class LocalVpnService extends VpnService {
     private ParcelFileDescriptor vpnInterface = null;
-
-    // Переменные нашего конфига
-    private String serverIp;
-    private String dtlsPort;
-    private String wgPort;
-    private String localPort;
-    private String password;
-    private String vkHash;
+    private Process coreProcess;
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && "START".equals(intent.getAction())) {
-            String configString = intent.getStringExtra("CONFIG");
-            
-            // Разбираем строку: IP:dtls_port:wg_port:local_port:password:vk_hash
-            if (configString != null) {
-                String[] parts = configString.split(":");
-                if (parts.length >= 6) {
-                    serverIp = parts[0];
-                    dtlsPort = parts[1];
-                    wgPort = parts[2];
-                    localPort = parts[3];
-                    password = parts[4];
-                    vkHash = parts[5];
-                    
-                    Log.i("WDTT", "Успешный импорт конфига! Подключение к: " + serverIp + ":" + dtlsPort);
-                    setupVpn();
-                } else {
-                    Log.e("WDTT", "Битый конфиг! Не хватает параметров.");
-                }
-            }
+            String config = intent.getStringExtra("CONFIG");
+            setupVpn();
+            runCore(config);
         }
         return START_STICKY;
     }
 
-    private void setupVpn() {
-        if (vpnInterface != null) return;
-
+    private void runCore(String config) {
         try {
-            Builder builder = new Builder();
-            builder.addAddress("10.0.0.2", 24);
-            builder.addRoute("0.0.0.0", 0);
-            builder.addDnsServer("8.8.8.8");
-            
-            // Используем IP сервера для исключения из петли маршрутизации, чтобы VPN не замкнулся сам на себя
-            // builder.addRoute(serverIp, 32); // (Раскомментируем при полной реализации сети)
-            
-            builder.setSession("VK TURN: " + serverIp);
+            File coreFile = new File(getFilesDir(), "core");
+            // Копируем из assets в память, если файла там еще нет
+            if (!coreFile.exists()) {
+                InputStream is = getAssets().open("core");
+                FileOutputStream fos = new FileOutputStream(coreFile);
+                byte[] buffer = new byte[8192];
+                int read;
+                while ((read = is.read(buffer)) != -1) fos.write(buffer, 0, read);
+                fos.close();
+                is.close();
+            }
+            coreFile.setExecutable(true);
 
-            vpnInterface = builder.establish();
-            Log.i("WDTT", "Интерфейс VPN поднят для сессии VK TURN.");
-            
-            // TODO: Запуск Go-бинарника или сетевого сокета для связи с сервером
-            
+            // Запуск бинарника: передаем конфиг через аргументы
+            ProcessBuilder pb = new ProcessBuilder(coreFile.getAbsolutePath(), "-c", config);
+            // Перенаправляем логи в null, чтобы приложение не зависло от вывода
+            pb.redirectErrorStream(true);
+            coreProcess = pb.start();
         } catch (Exception e) {
             e.printStackTrace();
-            Log.e("WDTT", "Ошибка запуска туннеля: " + e.getMessage());
         }
     }
 
+    private void setupVpn() {
+        if (vpnInterface != null) return;
+        Builder builder = new Builder();
+        builder.addAddress("10.0.0.2", 24).addRoute("0.0.0.0", 0).addDnsServer("8.8.8.8");
+        vpnInterface = builder.establish();
+    }
+    
     @Override
     public void onDestroy() {
+        if (coreProcess != null) coreProcess.destroy();
         super.onDestroy();
-        try {
-            if (vpnInterface != null) vpnInterface.close();
-            vpnInterface = null;
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
     }
 }
